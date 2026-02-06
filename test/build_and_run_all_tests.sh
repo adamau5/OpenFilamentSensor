@@ -161,7 +161,7 @@ compile_test() {
     local extra_sources=()
     # test_jam_detector and test_additional_edge_cases include sources directly
     # and use mocks, so they don't need extra sources compiled
-    if [ "$output_name" = "test_jam_detector" ] || [ "$output_name" = "test_additional_edge_cases" ]; then
+    if [ "$output_name" = "test_jam_detector" ] || [ "$output_name" = "test_additional_edge_cases" ] || [ "$output_name" = "test_soak" ] || [ "$output_name" = "test_thread_safety" ]; then
         : # No extra sources - tests include what they need directly
     elif [ -f "../src/${output_name#test_}.cpp" ]; then
          extra_sources+=("../src/${output_name#test_}.cpp")
@@ -225,6 +225,7 @@ declare -a CPP_TESTS=(
     "test_logger:Logger Unit Tests"
     "test_integration:Integration Tests"
     "test_thread_safety:Thread Safety Stress Tests"
+    "test_soak:Soak Tests"
 )
 
 # In quick mode, only run pulse_simulator
