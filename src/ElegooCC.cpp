@@ -80,9 +80,9 @@ printer_info_t ElegooCC::getCurrentInformation()
     info.runoutPauseCommanded = runoutPauseCommanded;
     info.runoutPauseRemainingMm = runoutPauseRemainingMm;
     info.runoutPauseDelayMm   = runoutPauseDelayMm;
-    info.mainboardID          = mainboardID;
-    info.taskId               = taskId;
-    info.filename             = filename;
+    strlcpy(info.mainboardID, mainboardID.c_str(), sizeof(info.mainboardID));
+    strlcpy(info.taskId, taskId.c_str(), sizeof(info.taskId));
+    strlcpy(info.filename, filename.c_str(), sizeof(info.filename));
     info.printStatus          = printStatus;
     info.isPrinting           = (printStatus == SDCP_PRINT_STATUS_PRINTING && (machineStatusMask & (1 << SDCP_MACHINE_STATUS_PRINTING)) != 0);
     info.currentLayer         = currentLayer;

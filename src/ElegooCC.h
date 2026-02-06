@@ -78,12 +78,12 @@ typedef enum
     SDCP_COMMAND_STOP_FEEDING_MATERIAL = 132,
 } sdcp_command_t;
 
-// Struct to hold current printer information
+// Struct to hold current printer information (uses fixed-size buffers to avoid heap allocations)
 typedef struct
 {
-    String              mainboardID;
-    String              taskId;
-    String              filename;
+    char                mainboardID[64];
+    char                taskId[64];
+    char                filename[128];
     sdcp_print_status_t printStatus;
     bool                filamentStopped;
     bool                filamentRunout;
