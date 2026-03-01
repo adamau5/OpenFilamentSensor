@@ -120,7 +120,10 @@ To accelerate loops and increase internal load for crash reproduction, build wit
 
 ```ini
 # platformio.ini
-build_flags = -DSTRESS_MODE
+# Add to an environment's build_flags (preserving existing flags):
+build_flags =
+    ${common.build_flags}
+    -DSTRESS_MODE
 ```
 
 ## Contributing
