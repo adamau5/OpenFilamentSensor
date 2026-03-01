@@ -99,146 +99,123 @@ String getBuildVersion() {
     return version.length() > 0 ? version : "0.0.0";
 }
 
+// CRC32 for SSE payload deduplication (replaces full String comparison)
+uint32_t WebServer::crc32(const char *data, size_t length) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= (uint8_t)data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+    }
+    return ~crc;
+}
+
 WebServer::WebServer(int port) : server(port), statusEvents(kRouteStatusEvents) {}
 
 void WebServer::begin()
 {
     server.begin();
 
-    // Get settings endpoint
+    // --- GET /get_settings ---
+    // Serves pre-built cached settings JSON (built in loop() on main task)
+    // Thread-safe: double-buffered copy, short lock, no heap allocation
     server.on(kRouteGetSettings, HTTP_GET,
-              [](AsyncWebServerRequest *request)
+              [this](AsyncWebServerRequest *request)
               {
-                  String jsonResponse = settingsManager.toJson(false);
-                  request->send(200, "application/json", jsonResponse);
+                  char jsonBuf[kCacheBufSize];
+                  size_t len = cachedSettings.read(jsonBuf, sizeof(jsonBuf));
+
+                  if (len == 0)
+                  {
+                      request->send(503, "application/json", "{\"error\":\"initializing\"}");
+                  }
+                  else
+                  {
+                      request->send(200, "application/json", jsonBuf);
+                  }
               });
 
+    // --- POST /update_settings ---
+    // Thread-safe: copies JSON into pendingSettingsDoc and sets flag;
+    // actual settings mutation happens in loop() on the main task
     server.addHandler(new AsyncCallbackJsonWebHandler(
         kRouteUpdateSettings,
         [this](AsyncWebServerRequest *request, JsonVariant &json)
         {
-            JsonObject jsonObj = json.as<JsonObject>();
+            portENTER_CRITICAL(&pendingMutex);
+            bool alreadyPending = pendingSettingsUpdate;
+            portEXIT_CRITICAL(&pendingMutex);
 
-            // Track if IP address changed to trigger reconnect
-            String oldIp = settingsManager.getElegooIP();
-            bool ipChanged = false;
+            if (alreadyPending)
+            {
+                request->send(429, "application/json",
+                              "{\"error\":\"Settings update already pending\"}");
+                return;
+            }
 
-            // Only update fields that are present in the request
-            if (jsonObj.containsKey("elegooip"))
+            portENTER_CRITICAL(&pendingMutex);
+            pendingSettingsDoc.clear();
+            JsonObject src = json.as<JsonObject>();
+            JsonObject dst = pendingSettingsDoc.to<JsonObject>();
+            for (JsonPair kv : src)
             {
-                String newIp = jsonObj["elegooip"].as<String>();
-                ipChanged = (oldIp != newIp) && newIp.length() > 0;
-                settingsManager.setElegooIP(newIp);
+                dst[kv.key()] = kv.value();
             }
-            if (jsonObj.containsKey("ssid"))
-                settingsManager.setSSID(jsonObj["ssid"].as<String>());
-            if (jsonObj.containsKey("passwd") && jsonObj["passwd"].as<String>().length() > 0)
-                settingsManager.setPassword(jsonObj["passwd"].as<String>());
-            if (jsonObj.containsKey("ap_mode"))
-                settingsManager.setAPMode(jsonObj["ap_mode"].as<bool>());
-            if (jsonObj.containsKey("pause_on_runout"))
-                settingsManager.setPauseOnRunout(jsonObj["pause_on_runout"].as<bool>());
-            if (jsonObj.containsKey("enabled"))
-                settingsManager.setEnabled(jsonObj["enabled"].as<bool>());
-            if (jsonObj.containsKey("detection_length_mm"))
-                settingsManager.setDetectionHardJamMm(jsonObj["detection_length_mm"].as<float>());
-            if (jsonObj.containsKey("detection_grace_period_ms"))
-                settingsManager.setDetectionGracePeriodMs(jsonObj["detection_grace_period_ms"].as<int>());
-            if (jsonObj.containsKey("detection_ratio_threshold"))
-                settingsManager.setDetectionRatioThreshold(jsonObj["detection_ratio_threshold"].as<int>());
-            if (jsonObj.containsKey("detection_hard_jam_mm"))
-                settingsManager.setDetectionHardJamMm(jsonObj["detection_hard_jam_mm"].as<float>());
-            if (jsonObj.containsKey("detection_soft_jam_time_ms"))
-                settingsManager.setDetectionSoftJamTimeMs(jsonObj["detection_soft_jam_time_ms"].as<int>());
-            if (jsonObj.containsKey("detection_hard_jam_time_ms"))
-                settingsManager.setDetectionHardJamTimeMs(jsonObj["detection_hard_jam_time_ms"].as<int>());
-            if (jsonObj.containsKey("detection_mode"))
-                settingsManager.setDetectionMode(jsonObj["detection_mode"].as<int>());
-            if (jsonObj.containsKey("sdcp_loss_behavior"))
-                settingsManager.setSdcpLossBehavior(jsonObj["sdcp_loss_behavior"].as<int>());
-            if (jsonObj.containsKey("flow_telemetry_stale_ms"))
-                settingsManager.setFlowTelemetryStaleMs(jsonObj["flow_telemetry_stale_ms"].as<int>());
-            if (jsonObj.containsKey("ui_refresh_interval_ms"))
-                settingsManager.setUiRefreshIntervalMs(jsonObj["ui_refresh_interval_ms"].as<int>());
-            if (jsonObj.containsKey("suppress_pause_commands"))
-                settingsManager.setSuppressPauseCommands(jsonObj["suppress_pause_commands"].as<bool>());
-            if (jsonObj.containsKey("log_level"))
-                settingsManager.setLogLevel(jsonObj["log_level"].as<int>());
-            if (jsonObj.containsKey("movement_mm_per_pulse"))
-                settingsManager.setMovementMmPerPulse(jsonObj["movement_mm_per_pulse"].as<float>());
-            if (jsonObj.containsKey("auto_calibrate_sensor"))
-                settingsManager.setAutoCalibrateSensor(jsonObj["auto_calibrate_sensor"].as<bool>());
-            if (jsonObj.containsKey("pulse_reduction_percent"))
-                settingsManager.setPulseReductionPercent(jsonObj["pulse_reduction_percent"].as<float>());
-            if (jsonObj.containsKey("test_recording_mode"))
-                settingsManager.setTestRecordingMode(jsonObj["test_recording_mode"].as<bool>());
-            if (jsonObj.containsKey("show_debug_page"))
-                settingsManager.setShowDebugPage(jsonObj["show_debug_page"].as<bool>());
-            if (jsonObj.containsKey("timezone_offset_minutes"))
-                settingsManager.setTimezoneOffsetMinutes(jsonObj["timezone_offset_minutes"].as<int>());
+            pendingSettingsUpdate = true;
+            portEXIT_CRITICAL(&pendingMutex);
 
-            bool saved = settingsManager.save();
-            if (saved)
-            {
-                elegooCC.refreshCaches();
-                if (ipChanged)
-                {
-                    elegooCC.reconnect();
-                }
-                request->send(200, "application/json", "{\"status\":\"ok\"}");
-            }
-            else
-            {
-                request->send(500, "application/json",
-                              "{\"error\":\"Failed to save settings to flash\"}");
-            }
+            request->send(200, "application/json", "{\"status\":\"ok\"}");
         }));
 
+    // --- POST /test_pause ---
+    // Thread-safe: sets flag, loop() calls pausePrint()
     server.on(kRouteTestPause, HTTP_POST,
-              [](AsyncWebServerRequest *request)
+              [this](AsyncWebServerRequest *request)
               {
-                  elegooCC.pausePrint();
+                  pendingPause = true;
                   request->send(200, "text/plain", "ok");
               });
 
+    // --- POST /test_resume ---
+    // Thread-safe: sets flag, loop() calls continuePrint()
     server.on(kRouteTestResume, HTTP_POST,
-              [](AsyncWebServerRequest *request)
+              [this](AsyncWebServerRequest *request)
               {
-                  elegooCC.continuePrint();
+                  pendingResume = true;
                   request->send(200, "text/plain", "ok");
               });
 
     // POST /discover_printer - Start discovery scan
+    // Thread-safe: sets flag, loop() calls startDiscoveryAsync()
     server.on(kRouteDiscoverPrinter, HTTP_POST,
-              [](AsyncWebServerRequest *request)
+              [this](AsyncWebServerRequest *request)
               {
                   if (elegooCC.isDiscoveryActive())
                   {
                       request->send(200, "application/json", "{\"active\":true}");
                       return;
                   }
-                  elegooCC.startDiscoveryAsync(5000, nullptr);  // 5 seconds with socket recycling
+                  pendingDiscovery = true;
                   request->send(200, "application/json", "{\"started\":true}");
               });
 
     // GET /discover_printer - Poll discovery status and results
+    // Thread-safe: double-buffered copy, short lock, no heap allocation
     server.on(kRouteDiscoverPrinter, HTTP_GET,
-              [](AsyncWebServerRequest *request)
+              [this](AsyncWebServerRequest *request)
               {
-                  DynamicJsonDocument jsonDoc(1024);
-                  jsonDoc["active"] = elegooCC.isDiscoveryActive();
+                  char jsonBuf[kCacheBufSize];
+                  size_t len = cachedDiscovery.read(jsonBuf, sizeof(jsonBuf));
 
-                  JsonArray printers = jsonDoc.createNestedArray("printers");
-                  for (const auto &res : elegooCC.getDiscoveryResults())
+                  if (len == 0)
                   {
-                      JsonObject p = printers.createNestedObject();
-                      p["ip"]      = res.ip;
-                      p["payload"] = res.payload;
+                      request->send(200, "application/json", "{\"active\":false,\"printers\":[]}");
                   }
-
-                  String response;
-                  serializeJson(jsonDoc, response);
-                  request->send(200, "application/json", response);
+                  else
+                  {
+                      request->send(200, "application/json", jsonBuf);
+                  }
               });
 
     // Setup ElegantOTA
@@ -255,73 +232,50 @@ void WebServer::begin()
                   ESP.restart();
               });
 
-    statusEvents.onConnect([](AsyncEventSourceClient *client) {
+    // SSE client connect handler with client cap
+    statusEvents.onConnect([this](AsyncEventSourceClient *client) {
+        if (statusEvents.count() > kMaxSSEClients)
+        {
+            // Over limit - the library already added the client, so we
+            // just won't send data and it will be cleaned up on next sweep.
+            logger.logf("SSE client rejected (count=%d, max=%d)",
+                        statusEvents.count(), kMaxSSEClients);
+            return;
+        }
         client->send("connected", "init", millis(), 1000);
     });
     server.addHandler(&statusEvents);
 
-    // Sensor status endpoint
+    // --- GET /sensor_status ---
+    // Thread-safe: double-buffered copy, short lock, no heap allocation
     server.on(kRouteSensorStatus, HTTP_GET,
               [this](AsyncWebServerRequest *request)
               {
-                  printer_info_t elegooStatus = elegooCC.getCurrentInformation();
+                  char jsonBuf[kCacheBufSize];
+                  size_t len = cachedSensorStatus.read(jsonBuf, sizeof(jsonBuf));
 
-                  // JSON allocation: 576 bytes heap (was 768 bytes)
-                  // Measured actual: ~480 bytes (83% utilization, 17% margin)
-                  // Last measured: 2025-11-26
-                  // See: .claude/hardcoded-allocations.md for maintenance notes
-                  DynamicJsonDocument jsonDoc(576);
-                  buildStatusJson(jsonDoc, elegooStatus);
-
-                  String jsonResponse;
-                  jsonResponse.reserve(576);  // Pre-allocate to prevent fragmentation
-                  serializeJson(jsonDoc, jsonResponse);
-
-                  // Pin Values level: Check if approaching allocation limit
-                  if (settingsManager.getLogLevel() >= LOG_PIN_VALUES)
+                  if (len == 0)
                   {
-                      size_t actualSize = measureJson(jsonDoc);
-                      static bool logged = false;
-                      if (!logged && actualSize > 490)  // >85% of 576 bytes
-                      {
-                          logger.logf(LOG_PIN_VALUES, "WebServer sensor_status JSON size: %zu / 576 bytes (%.1f%%)",
-                                     actualSize, (actualSize * 100.0f / 576.0f));
-                          logged = true;  // Only log once per session
-                      }
+                      request->send(503, "application/json", "{\"error\":\"initializing\"}");
                   }
-
-                  request->send(200, "application/json", jsonResponse);
+                  else
+                  {
+                      request->send(200, "application/json", jsonBuf);
+                  }
               });
 
     // Logs endpoint (DISABLED - JSON serialization of 1024 entries exceeds 32KB buffer)
     // Use /api/logs_live or /api/logs_text instead
-    // server.on("/api/logs", HTTP_GET,
-    //           [](AsyncWebServerRequest *request)
-    //           {
-    //               String jsonResponse = logger.getLogsAsJson();
-    //               request->send(200, "application/json", jsonResponse);
-    //           });
 
     // Raw text logs endpoint (full logs for download)
     server.on(kRouteLogsText, HTTP_GET,
               [](AsyncWebServerRequest *request)
               {
-                /*
-                  AsyncWebServerResponse *response = request->beginChunkedResponse("text/plain",
-                    [](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-                        // This uses a custom shim to adapt the Print interface to the chunked response
-                        // but since we don't have a direct "Print to buffer" adapter easily available for AsyncWebServer's callback style
-                        // without a class, we need a different approach.
-                        // Actually, Logger::streamLogs takes a Print*. AsyncResponseStream inherits from Print!
-                        return 0; 
-                    });
-                */ 
-         
                   AsyncResponseStream *streamResponse = request->beginResponseStream("text/plain");
                   streamResponse->addHeader("Content-Disposition", "attachment; filename=\"logs.txt\"");
-    
+
                   logger.streamLogs(streamResponse);
-                  
+
                   request->send(streamResponse);
               });
 
@@ -443,31 +397,33 @@ void WebServer::begin()
               });
 #endif
 
-    // Version endpoint
+    // Build version JSON once at startup (avoids LittleFS reads from async handler)
+    {
+        #ifdef BUILD_DATE
+            const char* buildDate = BUILD_DATE;
+            const char* buildTime = BUILD_TIME;
+        #else
+            const char* buildDate = __DATE__;
+            const char* buildTime = __TIME__;
+        #endif
+
+        StaticJsonDocument<512> jsonDoc;
+        jsonDoc["firmware_version"] = firmwareVersion;
+        jsonDoc["chip_family"]      = chipFamily;
+        jsonDoc["build_date"]       = buildDate;
+        jsonDoc["build_time"]       = buildTime;
+        jsonDoc["firmware_thumbprint"] = getBuildThumbprint(buildDate, buildTime);
+        jsonDoc["filesystem_thumbprint"] = getFilesystemThumbprint();
+        jsonDoc["build_version"] = getBuildVersion();
+
+        serializeJson(jsonDoc, cachedVersionJson, sizeof(cachedVersionJson));
+    }
+
+    // Version endpoint - serves pre-built JSON (no LittleFS access, thread-safe)
     server.on(kRouteVersion, HTTP_GET,
-              [](AsyncWebServerRequest *request)
+              [this](AsyncWebServerRequest *request)
               {
-                  // Use BUILD_DATE and BUILD_TIME if set by build script, otherwise fall back to __DATE__ and __TIME__
-                  #ifdef BUILD_DATE
-                      const char* buildDate = BUILD_DATE;
-                      const char* buildTime = BUILD_TIME;
-                  #else
-                      const char* buildDate = __DATE__;
-                      const char* buildTime = __TIME__;
-                  #endif
-
-                  DynamicJsonDocument jsonDoc(512);
-                  jsonDoc["firmware_version"] = firmwareVersion;
-                  jsonDoc["chip_family"]      = chipFamily;
-                  jsonDoc["build_date"]       = buildDate;
-                  jsonDoc["build_time"]       = buildTime;
-                  jsonDoc["firmware_thumbprint"] = getBuildThumbprint(buildDate, buildTime);
-                  jsonDoc["filesystem_thumbprint"] = getFilesystemThumbprint();
-                  jsonDoc["build_version"] = getBuildVersion();
-
-                  String jsonResponse;
-                  serializeJson(jsonDoc, jsonResponse);
-                  request->send(200, "application/json", jsonResponse);
+                  request->send(200, "application/json", cachedVersionJson);
               });
 
     // Serve lightweight UI from /lite (if available)
@@ -496,10 +452,208 @@ void WebServer::begin()
     });
 }
 
+void WebServer::processPendingCommands()
+{
+    // Process pending pause command
+    if (pendingPause)
+    {
+        pendingPause = false;
+        elegooCC.pausePrint();
+    }
+
+    // Process pending resume command
+    if (pendingResume)
+    {
+        pendingResume = false;
+        elegooCC.continuePrint();
+    }
+
+    // Process pending discovery
+    if (pendingDiscovery)
+    {
+        pendingDiscovery = false;
+        if (!elegooCC.isDiscoveryActive())
+        {
+            elegooCC.startDiscoveryAsync(5000, nullptr);
+        }
+    }
+
+    // Process pending reconnect (triggered by IP change in settings update)
+    if (pendingReconnect)
+    {
+        pendingReconnect = false;
+        elegooCC.reconnect();
+    }
+
+    // Process pending settings update
+    if (pendingSettingsUpdate)
+    {
+        portENTER_CRITICAL(&pendingMutex);
+        // Copy the doc locally so we can release the mutex quickly
+        StaticJsonDocument<1024> localDoc;
+        localDoc.set(pendingSettingsDoc);
+        pendingSettingsUpdate = false;
+        portEXIT_CRITICAL(&pendingMutex);
+
+        JsonObject jsonObj = localDoc.as<JsonObject>();
+
+        // Track if IP address changed to trigger reconnect
+        String oldIp = settingsManager.getElegooIP();
+        bool ipChanged = false;
+
+        // Only update fields that are present in the request
+        if (jsonObj.containsKey("elegooip"))
+        {
+            String newIp = jsonObj["elegooip"].as<String>();
+            ipChanged = (oldIp != newIp) && newIp.length() > 0;
+            settingsManager.setElegooIP(newIp);
+        }
+        if (jsonObj.containsKey("ssid"))
+            settingsManager.setSSID(jsonObj["ssid"].as<String>());
+        if (jsonObj.containsKey("passwd") && jsonObj["passwd"].as<String>().length() > 0)
+            settingsManager.setPassword(jsonObj["passwd"].as<String>());
+        if (jsonObj.containsKey("ap_mode"))
+            settingsManager.setAPMode(jsonObj["ap_mode"].as<bool>());
+        if (jsonObj.containsKey("pause_on_runout"))
+            settingsManager.setPauseOnRunout(jsonObj["pause_on_runout"].as<bool>());
+        if (jsonObj.containsKey("enabled"))
+            settingsManager.setEnabled(jsonObj["enabled"].as<bool>());
+        if (jsonObj.containsKey("detection_length_mm"))
+            settingsManager.setDetectionHardJamMm(jsonObj["detection_length_mm"].as<float>());
+        if (jsonObj.containsKey("detection_grace_period_ms"))
+            settingsManager.setDetectionGracePeriodMs(jsonObj["detection_grace_period_ms"].as<int>());
+        if (jsonObj.containsKey("detection_ratio_threshold"))
+            settingsManager.setDetectionRatioThreshold(jsonObj["detection_ratio_threshold"].as<int>());
+        if (jsonObj.containsKey("detection_hard_jam_mm"))
+            settingsManager.setDetectionHardJamMm(jsonObj["detection_hard_jam_mm"].as<float>());
+        if (jsonObj.containsKey("detection_soft_jam_time_ms"))
+            settingsManager.setDetectionSoftJamTimeMs(jsonObj["detection_soft_jam_time_ms"].as<int>());
+        if (jsonObj.containsKey("detection_hard_jam_time_ms"))
+            settingsManager.setDetectionHardJamTimeMs(jsonObj["detection_hard_jam_time_ms"].as<int>());
+        if (jsonObj.containsKey("detection_mode"))
+            settingsManager.setDetectionMode(jsonObj["detection_mode"].as<int>());
+        if (jsonObj.containsKey("sdcp_loss_behavior"))
+            settingsManager.setSdcpLossBehavior(jsonObj["sdcp_loss_behavior"].as<int>());
+        if (jsonObj.containsKey("flow_telemetry_stale_ms"))
+            settingsManager.setFlowTelemetryStaleMs(jsonObj["flow_telemetry_stale_ms"].as<int>());
+        if (jsonObj.containsKey("ui_refresh_interval_ms"))
+            settingsManager.setUiRefreshIntervalMs(jsonObj["ui_refresh_interval_ms"].as<int>());
+        if (jsonObj.containsKey("suppress_pause_commands"))
+            settingsManager.setSuppressPauseCommands(jsonObj["suppress_pause_commands"].as<bool>());
+        if (jsonObj.containsKey("log_level"))
+            settingsManager.setLogLevel(jsonObj["log_level"].as<int>());
+        if (jsonObj.containsKey("movement_mm_per_pulse"))
+            settingsManager.setMovementMmPerPulse(jsonObj["movement_mm_per_pulse"].as<float>());
+        if (jsonObj.containsKey("auto_calibrate_sensor"))
+            settingsManager.setAutoCalibrateSensor(jsonObj["auto_calibrate_sensor"].as<bool>());
+        if (jsonObj.containsKey("pulse_reduction_percent"))
+            settingsManager.setPulseReductionPercent(jsonObj["pulse_reduction_percent"].as<float>());
+        if (jsonObj.containsKey("test_recording_mode"))
+            settingsManager.setTestRecordingMode(jsonObj["test_recording_mode"].as<bool>());
+        if (jsonObj.containsKey("show_debug_page"))
+            settingsManager.setShowDebugPage(jsonObj["show_debug_page"].as<bool>());
+        if (jsonObj.containsKey("timezone_offset_minutes"))
+            settingsManager.setTimezoneOffsetMinutes(jsonObj["timezone_offset_minutes"].as<int>());
+
+        bool saved = settingsManager.save();
+        if (saved)
+        {
+            elegooCC.refreshCaches();
+            settingsJsonDirty = true;  // Rebuild cached settings JSON
+            if (ipChanged)
+            {
+                pendingReconnect = true;
+            }
+        }
+        else
+        {
+            logger.log("Failed to save settings from pending update");
+        }
+    }
+}
+
+void WebServer::refreshCachedResponses()
+{
+    // Rebuild sensor status JSON (called every loop iteration from main task)
+    {
+        printer_info_t elegooStatus = elegooCC.getCurrentInformation();
+        StaticJsonDocument<768> jsonDoc;
+        buildStatusJson(jsonDoc, elegooStatus);
+
+        char jsonBuf[kCacheBufSize];
+        size_t len = serializeJson(jsonDoc, jsonBuf, sizeof(jsonBuf));
+
+        cachedSensorStatus.publish(jsonBuf, len);
+        cachedPrintStatus = elegooStatus.printStatus;
+    }
+
+    // Rebuild discovery JSON (only while discovery is active or results exist)
+    {
+        StaticJsonDocument<1024> jsonDoc;
+        jsonDoc["active"] = elegooCC.isDiscoveryActive();
+
+        JsonArray printers = jsonDoc.createNestedArray("printers");
+        for (const auto &res : elegooCC.getDiscoveryResults())
+        {
+            JsonObject p = printers.createNestedObject();
+            p["ip"]      = res.ip;
+            p["payload"] = res.payload;
+        }
+
+        char jsonBuf[kCacheBufSize];
+        size_t len = serializeJson(jsonDoc, jsonBuf, sizeof(jsonBuf));
+
+        cachedDiscovery.publish(jsonBuf, len);
+    }
+
+    // Rebuild settings JSON only when dirty
+    if (settingsJsonDirty)
+    {
+        settingsJsonDirty = false;
+        String newSettingsJson = settingsManager.toJson(false);
+
+        cachedSettings.publish(newSettingsJson.c_str(), newSettingsJson.length());
+    }
+}
+
+void WebServer::cleanupSSEClients()
+{
+    unsigned long now = millis();
+    if (now - lastSSECleanupMs < 30000)
+    {
+        return;
+    }
+    lastSSECleanupMs = now;
+
+    int clientCount = statusEvents.count();
+    if (clientCount > kMaxSSEClients)
+    {
+        logger.logf("SSE cleanup: %d clients (max %d), closing stale connections",
+                     clientCount, kMaxSSEClients);
+        statusEvents.close();
+    }
+}
+
 void WebServer::loop()
 {
     ElegantOTA.loop();
     unsigned long now = millis();
+
+    // Process commands queued by async web handlers (thread-safe)
+    processPendingCommands();
+
+    // Rebuild cached JSON responses on the main task (thread-safe)
+    refreshCachedResponses();
+    if (kStressCacheRefreshes > 0)
+    {
+        for (int i = 0; i < kStressCacheRefreshes; i++)
+        {
+            refreshCachedResponses();
+        }
+    }
+
+    // Periodic SSE client cleanup
+    cleanupSSEClients();
 
     // Periodic web server diagnostics (every 30s)
     static unsigned long lastDiagMs = 0;
@@ -523,7 +677,7 @@ void WebServer::loop()
     }
 }
 
-void WebServer::buildStatusJson(DynamicJsonDocument &jsonDoc, const printer_info_t &elegooStatus)
+void WebServer::buildStatusJson(StaticJsonDocument<768> &jsonDoc, const printer_info_t &elegooStatus)
 {
     jsonDoc["stopped"]        = elegooStatus.filamentStopped;
     jsonDoc["filamentRunout"] = elegooStatus.filamentRunout;
@@ -570,47 +724,39 @@ void WebServer::buildStatusJson(DynamicJsonDocument &jsonDoc, const printer_info
 
 void WebServer::broadcastStatusUpdate()
 {
-    printer_info_t elegooStatus = elegooCC.getCurrentInformation();
-    // JSON allocation: 576 bytes heap (was 768 bytes)
-    // Measured actual: ~480 bytes (83% utilization, 17% margin)
-    // Last measured: 2025-11-26
-    // See: .claude/hardcoded-allocations.md for maintenance notes
-    DynamicJsonDocument jsonDoc(576);
-    buildStatusJson(jsonDoc, elegooStatus);
-    String payload;
-    payload.reserve(576);  // Pre-allocate to prevent fragmentation
-    serializeJson(jsonDoc, payload);
+    // Use the pre-built cached sensor status JSON (double-buffered, short-lock copy)
+    char payloadBuf[kCacheBufSize];
+    size_t payloadLen = cachedSensorStatus.read(payloadBuf, sizeof(payloadBuf));
+    sdcp_print_status_t printStatus = cachedPrintStatus;
 
-    // Pin Values level: Check if approaching allocation limit
-    if (settingsManager.getLogLevel() >= LOG_PIN_VALUES)
+    if (payloadLen == 0)
     {
-        size_t actualSize = measureJson(jsonDoc);
-        static bool logged = false;
-        if (!logged && actualSize > 490)  // >85% of 576 bytes
-        {
-            logger.logf(LOG_PIN_VALUES, "WebServer broadcastStatusUpdate JSON size: %zu / 576 bytes (%.1f%%)",
-                       actualSize, (actualSize * 100.0f / 576.0f));
-            logged = true;  // Only log once per session
-        }
+        return;
     }
 
-    bool idleState = (elegooStatus.printStatus == 0 || elegooStatus.printStatus == 9);
+    bool idleState = (printStatus == SDCP_PRINT_STATUS_IDLE ||
+                      printStatus == SDCP_PRINT_STATUS_COMPLETE);
+
     if (idleState)
     {
-        if (payload == lastIdlePayload)
+        uint32_t payloadCrc = crc32(payloadBuf, payloadLen);
+        if (hasLastIdlePayload && payloadCrc == lastIdlePayloadCrc)
         {
-            statusBroadcastIntervalMs = 5000;
+            statusBroadcastIntervalMs = kStatusBroadcastIntervalMsDefault;
             return;
         }
-        lastIdlePayload = payload;
+        lastIdlePayloadCrc = payloadCrc;
+        hasLastIdlePayload = true;
     }
     else
     {
-        lastIdlePayload = "";
+        hasLastIdlePayload = false;
     }
 
-    statusEvents.send(payload.c_str(), "status");
+    statusEvents.send(payloadBuf, "status");
 
-    bool isPrinting = elegooStatus.printStatus != 0 && elegooStatus.printStatus != 9;
-    statusBroadcastIntervalMs = isPrinting ? 1000 : 5000;
+    bool isPrinting = (printStatus != SDCP_PRINT_STATUS_IDLE &&
+                       printStatus != SDCP_PRINT_STATUS_COMPLETE);
+    statusBroadcastIntervalMs = isPrinting ? kStatusBroadcastIntervalMsPrinting
+                                           : kStatusBroadcastIntervalMsDefault;
 }

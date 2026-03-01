@@ -114,6 +114,18 @@ This creates an isolated build environment in `tools/.venv/` and `tools/.platfor
 python tools/setup_local_env.py
 ```
 
+### Stress mode (optional)
+
+To accelerate loops and increase internal load for crash reproduction, build with:
+
+```ini
+# platformio.ini
+# Add to an environment's build_flags (preserving existing flags):
+build_flags =
+    ${common.build_flags}
+    -DSTRESS_MODE
+```
+
 ## Contributing
 
 - Run `python tools/build_and_flash.py --local` before opening a PR (verifies the build still succeeds).  

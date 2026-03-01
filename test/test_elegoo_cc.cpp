@@ -183,9 +183,9 @@ typedef enum {
 #include "../src/FilamentMotionSensor.h"
 #include "../src/FilamentMotionSensor.cpp"
 
-// Simplified printer info struct for testing
+// Simplified printer info struct for testing (uses fixed-size buffers matching production)
 struct printer_info_t {
-    String              mainboardID;
+    char                mainboardID[64];
     sdcp_print_status_t printStatus;
     bool                filamentStopped;
     bool                filamentRunout;
@@ -363,7 +363,7 @@ public:
 
     printer_info_t getCurrentInformation() {
         printer_info_t info;
-        info.mainboardID = mainboardID;
+        strlcpy(info.mainboardID, mainboardID.c_str(), sizeof(info.mainboardID));
         info.printStatus = printStatus;
         info.filamentStopped = false;
         info.filamentRunout = filamentRunout;
@@ -618,7 +618,7 @@ void testGetCurrentInformation() {
 
     printer_info_t info = ecc.getCurrentInformation();
 
-    TEST_ASSERT(info.mainboardID == "test-board-123", "Mainboard ID should match");
+    TEST_ASSERT(strcmp(info.mainboardID, "test-board-123") == 0, "Mainboard ID should match");
     TEST_ASSERT(info.printStatus == SDCP_PRINT_STATUS_PRINTING, "Print status should match");
     TEST_ASSERT(info.currentLayer == 50, "Current layer should match");
     TEST_ASSERT(info.totalLayer == 100, "Total layer should match");

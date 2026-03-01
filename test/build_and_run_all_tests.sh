@@ -11,6 +11,8 @@
 #   --quick        Run only pulse_simulator (fast smoke test)
 #   --filter NAME  Run only tests matching NAME
 #   --verbose      Show full compilation output
+#   --sanitize     Compile with AddressSanitizer (detects heap/stack errors)
+#   --tsan         Compile with ThreadSanitizer (detects data races)
 #   --no-python    Skip Python tests
 #   --no-node      Skip Node/JavaScript tests
 #   --help         Show this help message
@@ -32,6 +34,7 @@ FILTER=""
 VERBOSE=false
 SKIP_PYTHON=false
 SKIP_NODE=false
+SANITIZER_FLAGS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -47,6 +50,14 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --sanitize)
+            SANITIZER_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g"
+            shift
+            ;;
+        --tsan)
+            SANITIZER_FLAGS="-fsanitize=thread -g"
+            shift
+            ;;
         --no-python)
             SKIP_PYTHON=true
             shift
@@ -56,7 +67,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help)
-            head -25 "$0" | tail -20
+            head -27 "$0" | tail -22
             exit 0
             ;;
         *)
@@ -79,6 +90,11 @@ fi
 
 if [ -n "$FILTER" ]; then
     echo -e "${YELLOW}Filter: Running tests matching '$FILTER'${NC}"
+    echo ""
+fi
+
+if [ -n "$SANITIZER_FLAGS" ]; then
+    echo -e "${YELLOW}Sanitizer: $SANITIZER_FLAGS${NC}"
     echo ""
 fi
 
@@ -145,19 +161,25 @@ compile_test() {
     local extra_sources=()
     # test_jam_detector and test_additional_edge_cases include sources directly
     # and use mocks, so they don't need extra sources compiled
-    if [ "$output_name" = "test_jam_detector" ] || [ "$output_name" = "test_additional_edge_cases" ]; then
+    if [ "$output_name" = "test_jam_detector" ] || [ "$output_name" = "test_additional_edge_cases" ] || [ "$output_name" = "test_soak" ] || [ "$output_name" = "test_thread_safety" ]; then
         : # No extra sources - tests include what they need directly
     elif [ -f "../src/${output_name#test_}.cpp" ]; then
          extra_sources+=("../src/${output_name#test_}.cpp")
     fi
     
+    # Thread safety test needs pthreads
+    local extra_flags=""
+    if [ "$output_name" = "test_thread_safety" ]; then
+        extra_flags="-lpthread"
+    fi
+
     # Combine main source file with extra sources
     local all_sources=("${source_files[@]}" "${extra_sources[@]}")
 
     if [ "$VERBOSE" = true ]; then
-        g++ -std=c++17 -Wno-redefined-macros -o "$output_name" "${all_sources[@]}" $INCLUDE_PATHS
+        g++ -std=c++17 -Wno-redefined-macros $SANITIZER_FLAGS -o "$output_name" "${all_sources[@]}" $INCLUDE_PATHS $extra_flags
     else
-        g++ -std=c++17 -Wno-redefined-macros -o "$output_name" "${all_sources[@]}" $INCLUDE_PATHS 2>&1 | head -30
+        g++ -std=c++17 -Wno-redefined-macros $SANITIZER_FLAGS -o "$output_name" "${all_sources[@]}" $INCLUDE_PATHS $extra_flags 2>&1 | head -30
     fi
     
     # Use PIPESTATUS to get the exit code of g++, not head
@@ -202,6 +224,8 @@ declare -a CPP_TESTS=(
     "test_settings_manager:SettingsManager Unit Tests"
     "test_logger:Logger Unit Tests"
     "test_integration:Integration Tests"
+    "test_thread_safety:Thread Safety Stress Tests"
+    "test_soak:Soak Tests"
 )
 
 # In quick mode, only run pulse_simulator
