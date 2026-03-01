@@ -309,6 +309,7 @@ jobs:
         with:
           name: release-assets-${{ matrix.env }}
           path: release-assets-${{ matrix.env }}
+          retention-days: 3
 
   check-main-tag:
     name: Verify tag is on main

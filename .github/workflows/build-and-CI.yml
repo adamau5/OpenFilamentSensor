@@ -125,3 +125,4 @@ jobs:
         with:
           name: firmware-${{ matrix.env }}-${{ steps.timestamp.outputs.datetime }}
           path: artifacts/${{ matrix.env }}
+          retention-days: 2

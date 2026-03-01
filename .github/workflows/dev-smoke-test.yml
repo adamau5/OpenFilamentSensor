@@ -98,3 +98,4 @@ jobs:
         with:
           name: firmware-esp32s3-${{ steps.timestamp.outputs.datetime }}
           path: artifacts/esp32s3
+          retention-days: 2

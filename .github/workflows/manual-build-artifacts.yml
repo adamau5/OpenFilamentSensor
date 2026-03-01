@@ -283,3 +283,4 @@ jobs:
         with:
           name: manual-assets-${{ matrix.env }}
           path: manual-assets-${{ matrix.env }}
+          retention-days: 3
